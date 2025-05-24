@@ -43,4 +43,4 @@ python syn.py \
 
 maybe i can insert the source infos into somewhere
 
-yet need to debug and execute the dafny code in a sandbox?(i will connect xuxu to seek for a best way)
+yet need to debug and execute the dafny code in a sandbox?(i will connect xuxu to seek for the best practices)
