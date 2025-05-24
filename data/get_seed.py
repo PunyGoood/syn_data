@@ -8,7 +8,7 @@ df = pd.read_parquet('ex_data.parquet')
 # print(df.head())
 
 
-selected_df = df[['id', 'sha1','seed']]
+selected_df = df[['id', 'sha1','seed']].head(20)
 
 records = selected_df.to_dict('records')
 

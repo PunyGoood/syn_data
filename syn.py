@@ -5,7 +5,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from typing import cast, Literal
-import tqdm
+from tqdm.auto import tqdm
 from datasets import Dataset, load_dataset
 from pathlib import Path
 from transformers import HfArgumentParser
@@ -138,16 +138,13 @@ def parse_property(content: str) -> Property | None:
 
 @dataclass(frozen=True)
 class Args:
+    instruct_mode: InstructMode
     seed_data_files: list[str] = field(
         metadata={"help": "Path to the seed code snippets"}
     )
-    max_new_data: int
-    instruct_mode: InstructMode
-
+    max_new_data: int = field(default=1000000)
     use_api: bool = field(default=True)
     
-    # 移除 model 和 vllm 相关参数
-    # 添加 Claude 相关参数
 
     claude_model: str = field(default="claude-3-5-sonnet-20240620")
     
@@ -158,7 +155,7 @@ class Args:
     temperature: float = field(default=0.7)
     ##待定
     max_output_tokens: int = field(default=1600)
-    num_fewshots: int = field(default=8)
+    num_fewshots: int = field(default=1)
     
     # 批处理相关参数
     num_batched_requests: int = field(
@@ -167,6 +164,24 @@ class Args:
     sleep: float | None = field(
         default=None, metadata={"help": "Sleep between requests in seconds"}
     )
+    tag: str = field(default="", metadata={"help": "Tag for output file"})
+    num_sample_per_request: int = field(default=1, metadata={"help": "Number of samples per request"})
+    prompting_mode: Literal["chat", "completion"] = field(default="completion")
+    save_dir: str = field(default="./results/")
+
+    def fingerprint(self, fewshot: "Fewshot | None") -> str:
+        # The combination of arguments can uniquely determine the generation process
+        args = (
+            self.seed_data_files,
+            self.seed,
+            self.prompting_mode,
+            self.num_fewshots,
+            self.temperature,
+            self.claude_model,
+            self.max_output_tokens,
+            fewshot,
+        )
+        return utils.compute_fingerprint(*args, hash_length=5)
 
 
 @dataclass(frozen=True)
@@ -175,8 +190,7 @@ class Example:
     snippet: str
     instruction: str
     response: str
-    tests: str
-
+    
     @staticmethod
     def prefix_template(mode: InstructMode) -> str:
         if mode == "I->R":
@@ -205,18 +219,14 @@ class Example:
             if LLAMA3:
                 assert index is not None
                 kwargs["index"] = str(index)
-                suffix = f"{self.response}\n\n### Tests {index}\n{self.tests}"
+                suffix = f"{self.response}"
             else:
-                suffix = (
-                    f"{self.response}\n</response>\n\n<tests>\n{self.tests}\n</tests>"
-                )
+                suffix = f"{self.response}\n</response>"
         elif mode == "S->C":
             kwargs = dict(snippet=self.snippet)
             suffix = self.property.concepts_prompt()
         elif mode == "C->I":
             property_prompt = self.property.prompt()
-            # num_words = len(self.instruction.split())
-            # property_prompt += f"\nnum_words: {num_words}"
             kwargs = dict(property=property_prompt)
             suffix = self.instruction
         elif mode == "S->I":
@@ -234,15 +244,22 @@ class Example:
 
 @dataclass(frozen=True)
 class Fewshot:
-
     sys_s_c: str
-    sys_s_i: str
-
+    sys_c_i: str
+    sys_i_r: str
     examples: list[Example]
 
     def system_prompt(self, mode: InstructMode) -> str:
-        attr_name = "sys_" + mode.replace("->", "_").replace("-", "_").lower()
-        return getattr(self, attr_name)
+        if mode == "S->C":
+            return self.sys_s_c
+        elif mode == "C->I":
+            return self.sys_c_i
+        elif mode == "I->R":
+            return self.sys_i_r
+        elif mode == "S->I":
+            return self.sys_s_c
+        else:
+            assert False
 
     def valid_examples(self, mode: InstructMode) -> list[Example]:
         # if mode in ["E->S", "I->RT", "I->R"]:
@@ -303,40 +320,43 @@ class Fewshot:
 
 def get_ossinstruct_fewshots() -> Fewshot:
     content = Path("prompts/fewshot.txt").read_text().strip()
-    # split according to the example tag, but exclude the tag. Strip each string.
+    # 分割示例
     splits = re.split(r"### Example \d+", content)
     system_prompt = splits[0].strip()
-    sys_pattern = r"### System: S->C|### System: S->I"
-    _, s_c, s_i = list(map(str.strip, re.split(sys_pattern, system_prompt)))
-    # system_prompt = re.split(r"### System: Instruction", system_prompt)[1]
-    # instruction_system_prompt, response_system_prompt = system_prompt.split(
-    #     "### System: Response"
-    # )
-    # instruction_system_prompt = instruction_system_prompt.strip()
-    # response_system_prompt = response_system_prompt.strip()
+    
+    # 提取系统提示
+    sys_parts = re.split(r"### System: (S->C|C->I|I->R)", system_prompt)
+    s_c = sys_parts[2].strip()  # S->C 部分
+    c_i = sys_parts[4].strip()  # C->I 部分
+    i_r = sys_parts[6].strip()  # I->R 部分
+    
     examples_str = [example.strip() for example in splits[1:]]
-    assert len(examples_str) == 21, len(examples_str)
     examples = list[Example]()
+    
     for example_str in examples_str:
-        pattern = (
-            r"\[Code\]\n|\[Property\]\n|\[Instruction\]\n|\[Response\]\n|\[Tests\]\n"
+        pattern = r"\[Code\]|\[Property\]|\[Instruction\]|\[Response\]"
+        parts = re.split(pattern, example_str)
+        if len(parts) < 5:  # 跳过格式不正确的示例
+            continue
+            
+        _, snippet, property_str, instruction, response = [p.strip() for p in parts[:5]]
+        
+        property_obj = parse_property(property_str)
+        if property_obj is None:
+            continue
+            
+        example = Example(
+            property=property_obj,
+            snippet=snippet,
+            instruction=instruction,
+            response=response
         )
-        _, snippet, property, instruction, response, tests = re.split(
-            pattern, example_str
-        )
-        snippet = snippet.rstrip()
-        property = parse_property(property)
-        assert property is not None
-        instruction = instruction.strip()
-        response = response.strip()
-        tests = tests.strip()
-        example = Example(property, snippet, instruction, response, tests)
         examples.append(example)
-    # if args.external_data is not None:
-    #     examples.extend(external_examples)
+    
     return Fewshot(
         sys_s_c=s_c,
-        sys_s_i=s_i,
+        sys_c_i=c_i,  # 添加新的系统提示字段
+        sys_i_r=i_r,  # 添加新的系统提示字段
         examples=examples,
     )
 
@@ -447,12 +467,12 @@ async def main():
     chunked_dataset = list(
         utils.chunked(dataset, n=args.num_batched_requests)
     )
+    
+    
     pbar = tqdm(chunked_dataset)
     n_succeeded = 0
 
     
-    
-    # 主要修改请求生成部分
     for chunk_index, examples in enumerate(pbar):
         effective_index = (
             chunk_index * args.num_batched_requests + start_index + n_skipped
@@ -492,7 +512,9 @@ async def main():
                         }
                     ]
                 )
+   
                 response = raw_response['choices'][0]['message']['content']
+
                 return response
             except Exception as e:
                 print(f"Error in Claude API request: {e}")
@@ -509,7 +531,7 @@ async def main():
                 continue
                 
             # 解析 Claude 响应
-            content = response.content[0].text
+            content = response
             parsing_result = parse_generated_content(content, args.instruct_mode)
             
             if parsing_result is None:

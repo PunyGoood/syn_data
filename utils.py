@@ -3,6 +3,7 @@ import os
 import time
 import json
 from pathlib import Path
+import hashlib
 
 _T = TypeVar("_T")
 
@@ -26,3 +27,10 @@ def write_jsonl(path: str | Path, data: Sequence[Mapping], mode: str = "w"):
     with Path(path).open(mode) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
+
+def compute_fingerprint(*args: Any, hash_length: int | None = None) -> str:
+    combined = "".join(map(str, args))
+    content = hashlib.sha256(combined.encode()).hexdigest()
+    if hash_length is not None:
+        content = content[:hash_length]
+    return content
