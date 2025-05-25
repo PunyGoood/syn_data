@@ -13,6 +13,7 @@ import re
 import utils as utils
 import aiohttp
 from typing import List, Dict, Any, Optional
+import jsonlines
 #from utils import N_CORES
 
 LLAMA3 = os.getenv("LLAMA3") is not None
@@ -520,17 +521,17 @@ async def main():
                 print(f"Error in Claude API request: {e}")
                 return e
                 
-        # 创建并发任务
+        
         tasks = [process_prompt(prompt) for prompt in all_prompts]
         responses = await asyncio.gather(*tasks)
         
-        # 处理响应
+        
+        
         for prompt, example, response in zip(all_prompts, examples, responses):
             if isinstance(response, Exception):
                 print("Exception when generating response:", response)
                 continue
                 
-            # 解析 Claude 响应
             content = response
             parsing_result = parse_generated_content(content, args.instruct_mode)
             
@@ -540,26 +541,34 @@ async def main():
                 print("@@@Response", content, sep="\n", end="\n\n")
                 continue
                 
-            # 保存结果
-            data = dict(
-                prompt=prompt,
-                **{k: v for k, v in example.items() if k not in ["prompt"]},
-                **parsing_result
-            )
-            
-            print(
-                "@@@Prefix",
-                prompt,
-                f"@@@Generation",
-                content,
-                sep="\n",
-                end="\n\n",
-            )
-            
-            n_succeeded += 1
-            f_out.write(json.dumps(data) + "\n")
-            f_out.flush()
-            
+            try:
+                # 构建数据对象
+                data = {
+                    "prompt": prompt,
+                    **{k: v for k, v in example.items() if k not in ["prompt"]},
+                    **parsing_result
+                }
+                
+                # 确保每个 JSON 对象独占一行
+                json_str = json.dumps(data, ensure_ascii=False)
+                f_out.write(json_str + "\n")  # 添加换行符
+                f_out.flush()
+                
+                print(
+                    "@@@Prefix",
+                    prompt,
+                    f"@@@Generation",
+                    content,
+                    sep="\n",
+                    end="\n\n",
+                )
+                
+                n_succeeded += 1
+            except Exception as e:
+                print(f"Error saving result: {e}")
+                print("Data causing error:", data)
+                continue
+
         pbar.set_description(f"Success ratio: {n_succeeded} / {(chunk_index + 1) * len(examples)}")
 
 if __name__ == "__main__":
